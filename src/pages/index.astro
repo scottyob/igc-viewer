@@ -1,0 +1,65 @@
+---
+import IGCViewer from '../components/IGCViewer/IGCViewer.astro';
+
+const apiKey = import.meta.env.PUBLIC_GOOGLE_MAPS_API_KEY ?? '';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Flight Replay</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        font-family: system-ui, sans-serif;
+      }
+
+      #app {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      #viewer {
+        width: 100%;
+        height: 100%;
+      }
+
+      .no-key {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        background: #111;
+        font-size: 0.9rem;
+        text-align: center;
+        padding: 2rem;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="viewer">
+        {apiKey
+          ? <IGCViewer googleApiKey={apiKey} />
+          : (
+            <div class="no-key">
+              Set <code>PUBLIC_GOOGLE_MAPS_API_KEY</code> in <code>.env</code> to load Google Photorealistic 3D Tiles.
+            </div>
+          )
+        }
+      </div>
+    </div>
+  </body>
+</html>

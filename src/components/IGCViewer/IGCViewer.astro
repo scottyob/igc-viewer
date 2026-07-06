@@ -1,0 +1,12 @@
+---
+interface Props {
+  googleApiKey: string;
+  tracks?: { url: string; label: string }[];
+  landmarks?: { url: string; label?: string }[];
+}
+const { googleApiKey, tracks = [], landmarks = [] } = Astro.props;
+---
+<igc-viewer google-api-key={googleApiKey} tracks={JSON.stringify(tracks)} landmarks={JSON.stringify(landmarks)}></igc-viewer>
+<script>
+  import '../../IGCViewer';
+</script>

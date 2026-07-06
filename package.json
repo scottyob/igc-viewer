@@ -1,0 +1,85 @@
+{
+  "name": "igc-viewer",
+  "type": "module",
+  "version": "0.0.1",
+  "description": "3D paragliding and flight track viewer — Google Photorealistic 3D Tiles, Three.js WebGPU, framework-agnostic web component",
+  "keywords": [
+    "igc",
+    "paragliding",
+    "flight",
+    "gliding",
+    "3d-tiles",
+    "three.js",
+    "webgpu",
+    "web-component",
+    "viewer",
+    "gps",
+    "track"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scottyob/igc-viewer.git"
+  },
+  "homepage": "https://github.com/scottyob/igc-viewer",
+  "bugs": {
+    "url": "https://github.com/scottyob/igc-viewer/issues"
+  },
+  "types": "./src/IGCViewer.ts",
+  "files": [
+    "src/IGCViewer.ts",
+    "src/components/IGCViewer"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/IGCViewer.ts",
+      "import": "./src/IGCViewer.ts",
+      "default": "./src/IGCViewer.ts"
+    },
+    "./astro": {
+      "types": "./src/components/IGCViewer/IGCViewer.astro",
+      "default": "./src/components/IGCViewer/IGCViewer.astro"
+    },
+    "./types": {
+      "types": "./src/components/IGCViewer/types.ts",
+      "default": "./src/components/IGCViewer/types.ts"
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@takram/three-atmosphere": "^0.19.1",
+    "@takram/three-geospatial": "^0.9.1",
+    "3d-tiles-renderer": "^0.4.28",
+    "igc-parser": "^2.0.0"
+  },
+  "sideEffects": [
+    "./src/IGCViewer.ts"
+  ],
+  "peerDependencies": {
+    "astro": "^7.0.3",
+    "three": "^0.184.0"
+  },
+  "peerDependenciesMeta": {
+    "astro": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "@types/three": "^0.185.0",
+    "astro": "^7.0.3",
+    "three": "^0.184.0",
+    "typescript": "^6.0.3"
+  }
+}
