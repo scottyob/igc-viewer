@@ -612,16 +612,23 @@ export async function initViewer(options: ViewerOptions) {
     cameraAltitudeAnimId = requestAnimationFrame(step);
   }
 
-  // Load any tracks supplied via the `tracks` prop on component mount.
+  // Load any tracks supplied via the `tracks` prop on component mount. The
+  // first entry is the primary track: it loads first (so its task wins) and
+  // is re-selected once the rest have loaded.
+  let primaryTrackId: string | null = null;
   for (const entry of options.tracks ?? []) {
     try {
       const res = await fetch(entry.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       loadIGCTextWithTask(text, entry.label);
+      primaryTrackId ??= tracks.getTrack()?.id ?? null;
     } catch (err) {
       console.warn(`[IGC] failed to load track "${entry.label}":`, err);
     }
+  }
+  if (primaryTrackId !== null && tracks.getTrack()?.id !== primaryTrackId) {
+    tracks.selectTrack(primaryTrackId, true, playback.currentSeconds);
   }
 
   // Load landmark/places-of-interest files supplied via public options.
@@ -756,6 +763,8 @@ export async function initViewer(options: ViewerOptions) {
     },
     getTrack: tracks.getTrack,
     getTracks: tracks.getTracks,
+    setTrackVisible: tracks.setTrackVisible,
+    isTrackVisible: tracks.isTrackVisible,
     getHeading: tracks.getHeading,
     resetNorthUp: tracks.resetNorthUp,
     zoomCameraToGroundClearance,
@@ -797,7 +806,9 @@ export async function initViewer(options: ViewerOptions) {
     },
 
     getPilotScreenPositions(): Array<{ track: FlightTrack; x: number; y: number; lat: number; lon: number; alt: number; distance: number; visible: boolean }> {
-      return tracks.getPilotPositionsAt(playback.currentSeconds).map(({ track, lat, lon, alt }) => {
+      return tracks.getPilotPositionsAt(playback.currentSeconds)
+        .filter(({ track }) => tracks.isTrackVisible(track.id))
+        .map(({ track, lat, lon, alt }) => {
         const ecef = llaToECEF(lat, lon, alt);
         const ndc = ecef.clone().project(camera);
         return {

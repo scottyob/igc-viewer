@@ -78,6 +78,7 @@ type CurtainSample = { time: number; lat: number; lon: number; alt: number };
 type LoadedTrack = {
   track: FlightTrack;
   initialDate: Date;
+  hidden: boolean;
   line: Line2;
   curtain: Mesh;
   ecefPositions: Float32Array;
@@ -657,6 +658,11 @@ export function createTrackManager(
 
     for (const item of loadedTracks) {
       const { track, line, curtain, color } = item;
+      if (item.hidden) {
+        line.visible = false;
+        curtain.visible = false;
+        continue;
+      }
       const pts = track.points;
 
       // Find index of last visible point — each segment = one Line2 instance.
@@ -972,6 +978,7 @@ export function createTrackManager(
     loadedTracks.push({
       track,
       initialDate,
+      hidden: false,
       line,
       curtain,
       ecefPositions: positions,
@@ -1066,6 +1073,19 @@ export function createTrackManager(
     return loadedTracks.map((item) => item.track);
   }
 
+  function setTrackVisible(trackId: string, visible: boolean): void {
+    const item = loadedTracks.find((t) => t.track.id === trackId);
+    if (!item) return;
+    item.hidden = !visible;
+    item.line.visible = visible;
+    if (!visible) item.curtain.visible = false;
+  }
+
+  function isTrackVisible(trackId: string): boolean {
+    const item = loadedTracks.find((t) => t.track.id === trackId);
+    return item ? !item.hidden : true;
+  }
+
   function getPilotPositionsAt(seconds: number): Array<{ track: FlightTrack; lat: number; lon: number; alt: number }> {
     return loadedTracks.flatMap((item) => {
       const pos = getPilotPositionForTrack(item.track, seconds, true);
@@ -1086,6 +1106,8 @@ export function createTrackManager(
     removeTrack,
     getTrack,
     getTracks,
+    setTrackVisible,
+    isTrackVisible,
     getHeading,
     resetNorthUp,
     dispose,

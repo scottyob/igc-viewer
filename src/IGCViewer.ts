@@ -363,6 +363,24 @@ const SHADOW_CSS = `
 .igc-sidebar-toggle:hover { background: rgba(255,255,255,0.18); color: #fff; }
 .igc-sidebar-toggle svg { width: 100%; height: 100%; }
 
+.igc-tracks-visibility-all {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  color: rgba(255,255,255,0.45);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  transition: background 0.15s, color 0.15s;
+}
+.igc-tracks-visibility-all:hover { background: rgba(255,255,255,0.14); color: #fff; }
+.igc-tracks-visibility-all svg { width: 100%; height: 100%; }
+.igc-tracks-visibility-all[hidden] { display: none; }
+.igc-sb-tracks-toggle .igc-sb-chevron { margin-left: auto; }
+
 .igc-sidebar-content {
   flex: 1;
   overflow-y: auto;
@@ -509,10 +527,11 @@ const SHADOW_CSS = `
   position: relative;
   min-height: 34px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) 24px 24px;
   align-items: center;
   gap: 4px;
 }
+.igc-track-row-wrap.track-hidden .igc-track-row { opacity: 0.45; }
 .igc-track-row {
   appearance: none;
   -webkit-appearance: none;
@@ -651,6 +670,40 @@ const SHADOW_CSS = `
 }
 .igc-track-remove:hover {
   background: rgba(210, 40, 56, 0.96);
+  border-color: rgba(255,255,255,0.18);
+  color: #fff;
+}
+
+.igc-track-visibility {
+  width: 24px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+  color: rgba(255,255,255,0.68);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
+}
+.igc-track-visibility svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+.igc-track-row-wrap:hover .igc-track-visibility,
+.igc-track-visibility:focus-visible,
+.igc-track-row-wrap.track-hidden .igc-track-visibility {
+  opacity: 1;
+}
+.igc-track-row-wrap.track-hidden .igc-track-visibility {
+  color: rgba(255,255,255,0.42);
+}
+.igc-track-visibility:hover {
+  background: rgba(255,255,255,0.14);
   border-color: rgba(255,255,255,0.18);
   color: #fff;
 }
@@ -945,6 +998,7 @@ const SHADOW_HTML = `
       <section class="igc-sb-section">
         <button class="igc-sb-section-btn igc-sb-tracks-toggle">
           <span>Tracks</span>
+          <span class="igc-tracks-visibility-all" role="button" tabindex="0" title="Hide all tracks" aria-label="Hide all tracks" hidden></span>
           <svg class="igc-sb-chevron" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
           </svg>
@@ -1740,6 +1794,7 @@ class IGCViewerElement extends HTMLElement {
     const apiKey = this.getAttribute('google-api-key') ?? '';
     const tracks = parseJsonAttribute<TrackEntry[]>(this, 'tracks', []);
     const landmarks = parseJsonAttribute<LandmarkEntry[]>(this, 'landmarks', []);
+    const autoTracking = this.hasAttribute('auto-tracking');
 
     const root = this.#shadow.querySelector<HTMLElement>('.igc-root')!;
     root.dataset.apiKey = apiKey; // read by createTimeline for Timezone API calls
@@ -1909,6 +1964,7 @@ class IGCViewerElement extends HTMLElement {
       });
 
     const loadFiles = async (fileList: FileList | File[]) => {
+      let loadedTrack = false;
       for (const file of Array.from(fileList)) {
         const ext = file.name.split('.').pop()?.toLowerCase();
         const text = await readFileText(file);
@@ -1919,6 +1975,11 @@ class IGCViewerElement extends HTMLElement {
           continue;
         }
         viewer.loadIGCText(text, file.name);
+        loadedTrack = true;
+      }
+      if (autoTracking && loadedTrack) {
+        viewer.setTracking(true);
+        syncTrackingUi();
       }
     };
 
@@ -2024,6 +2085,52 @@ class IGCViewerElement extends HTMLElement {
     let lastTracksRenderKey = '';
     let trackSearchQuery = '';
 
+    // ── Track visibility (eye) toggles ───────────────────────────────────
+    const EYE_ICON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.6 8s2.3-4.3 6.4-4.3S14.4 8 14.4 8s-2.3 4.3-6.4 4.3S1.6 8 1.6 8z" stroke-linejoin="round"/><circle cx="8" cy="8" r="2.1"/></svg>`;
+    const EYE_OFF_ICON = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.6 8s2.3-4.3 6.4-4.3S14.4 8 14.4 8s-2.3 4.3-6.4 4.3S1.6 8 1.6 8z" stroke-linejoin="round"/><circle cx="8" cy="8" r="2.1"/><path d="M2 14 14 2" stroke-linecap="round"/></svg>`;
+    const allTracksVisBtn = root.querySelector<HTMLElement>('.igc-tracks-visibility-all')!;
+    const hiddenTrackIds = new Set<string>();
+    let lastAllTracksVisState = '';
+
+    function setTrackHidden(trackId: string, hidden: boolean) {
+      if (hidden) hiddenTrackIds.add(trackId);
+      else hiddenTrackIds.delete(trackId);
+      viewer.setTrackVisible(trackId, !hidden);
+    }
+
+    function syncAllTracksVisibilityBtn() {
+      const allTracks = viewer.getTracks();
+      const allHidden = allTracks.length > 0 && allTracks.every((track) => hiddenTrackIds.has(track.id));
+      const state = `${allTracks.length === 0}|${allHidden}`;
+      if (state === lastAllTracksVisState) return;
+      lastAllTracksVisState = state;
+      allTracksVisBtn.hidden = allTracks.length === 0;
+      allTracksVisBtn.innerHTML = allHidden ? EYE_OFF_ICON : EYE_ICON;
+      const title = allHidden ? 'Show all tracks' : 'Hide all tracks';
+      allTracksVisBtn.title = title;
+      allTracksVisBtn.setAttribute('aria-label', title);
+    }
+
+    function toggleAllTracksVisibility() {
+      const anyVisible = viewer.getTracks().some((track) => !hiddenTrackIds.has(track.id));
+      for (const track of viewer.getTracks()) setTrackHidden(track.id, anyVisible);
+      syncAllTracksVisibilityBtn();
+      lastTracksRenderKey = '';
+      renderTracksList(viewer.getTrack()?.id ?? null, viewer.playback.getCurrentSeconds());
+    }
+
+    // The control lives inside the section-collapse button, so keep clicks from toggling the section.
+    allTracksVisBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleAllTracksVisibility();
+    });
+    allTracksVisBtn.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleAllTracksVisibility();
+    });
+
     function getTrackName(track: ReturnType<typeof viewer.getTracks>[number]): string {
       return track.pilot || track.label || 'Track';
     }
@@ -2066,6 +2173,7 @@ class IGCViewerElement extends HTMLElement {
     }
 
     function renderTracksList(activeTrackId: string | null, currentSeconds = 0, autoScrollActiveTrack = false) {
+      syncAllTracksVisibilityBtn();
       const task = viewer.getTask();
       const trackingTrackId = viewer.isTracking() ? activeTrackId : null;
       const allTracks = viewer.getTracks();
@@ -2090,7 +2198,14 @@ class IGCViewerElement extends HTMLElement {
         const sa = viewer.getTaskScoreAt(a.id, currentSeconds);
         const sb = viewer.getTaskScoreAt(b.id, currentSeconds);
         if (sb !== sa) return sb - sa;
-        return viewer.getDistanceToNextTPAt(a.id, currentSeconds) - viewer.getDistanceToNextTPAt(b.id, currentSeconds);
+        // Both finished the course: places lock in finish order, so flying
+        // away after the last waypoint can't lose you your place.
+        if (sa > 0 && sa === task.scoreable.length) {
+          const fa = viewer.getTaskScoreTimes(a.id)[sa - 1] ?? Infinity;
+          const fb = viewer.getTaskScoreTimes(b.id)[sa - 1] ?? Infinity;
+          return fa - fb;
+        }
+        return (viewer.getDistanceToNextTPAt(a.id, currentSeconds) - viewer.getDistanceToNextTPAt(b.id, currentSeconds)) || 0;
       });
 
       const newOrder = sorted.map((t) => t.id);
@@ -2102,7 +2217,7 @@ class IGCViewerElement extends HTMLElement {
         task ? task.scoreable.length : 0,
         normalizedQuery,
         allTracks.length,
-        ...sorted.flatMap((track, i) => [track.id, track.color, getTrackName(track), scores[i] ?? '']),
+        ...sorted.flatMap((track, i) => [track.id, track.color, getTrackName(track), scores[i] ?? '', hiddenTrackIds.has(track.id) ? 'h' : '']),
       ].join('|');
       if (renderKey === lastTracksRenderKey) {
         if (activeTrackId && autoScrollActiveTrack) requestAnimationFrame(() => positionTrackInList(activeTrackId, 'auto', 'second-from-bottom'));
@@ -2122,6 +2237,7 @@ class IGCViewerElement extends HTMLElement {
         item.className = 'igc-track-row-wrap';
         item.classList.toggle('active',   track.id === activeTrackId);
         item.classList.toggle('tracking', track.id === trackingTrackId);
+        item.classList.toggle('track-hidden', hiddenTrackIds.has(track.id));
         item.dataset.trackId = track.id;
         item.setAttribute('role', 'listitem');
 
@@ -2169,6 +2285,16 @@ class IGCViewerElement extends HTMLElement {
         removeBtn.setAttribute('aria-label', `Remove ${name}`);
         removeBtn.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 4.2l7.6 7.6m0-7.6-7.6 7.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
 
+        const trackHidden = hiddenTrackIds.has(track.id);
+        const visBtn = document.createElement('button');
+        visBtn.type = 'button';
+        visBtn.className = 'igc-track-visibility';
+        visBtn.dataset.trackId = track.id;
+        const visTitle = trackHidden ? `Show ${name}` : `Hide ${name}`;
+        visBtn.title = visTitle;
+        visBtn.setAttribute('aria-label', visTitle);
+        visBtn.innerHTML = trackHidden ? EYE_OFF_ICON : EYE_ICON;
+
         if (task) {
           const score = scores[trackIndex] ?? 0;
           const total = task.scoreable.length;
@@ -2179,7 +2305,7 @@ class IGCViewerElement extends HTMLElement {
           row.append(badge);
         }
 
-        item.append(row, removeBtn);
+        item.append(row, visBtn, removeBtn);
         return item;
       });
 
@@ -2312,9 +2438,18 @@ class IGCViewerElement extends HTMLElement {
     });
 
     tracksListEl.addEventListener('click', (e) => {
+      const visBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('.igc-track-visibility');
+      if (visBtn?.dataset.trackId) {
+        setTrackHidden(visBtn.dataset.trackId, !hiddenTrackIds.has(visBtn.dataset.trackId));
+        lastTracksRenderKey = '';
+        renderTracksList(viewer.getTrack()?.id ?? null, viewer.playback.getCurrentSeconds());
+        return;
+      }
       const removeBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('.igc-track-remove');
       if (removeBtn?.dataset.trackId) {
+        hiddenTrackIds.delete(removeBtn.dataset.trackId);
         viewer.removeTrack(removeBtn.dataset.trackId);
+        lastTracksRenderKey = '';
         renderTracksList(viewer.getTrack()?.id ?? null, viewer.playback.getCurrentSeconds());
         return;
       }
@@ -2406,10 +2541,36 @@ class IGCViewerElement extends HTMLElement {
     });
     viewer.setOnTrackingChange(syncTrackingUi);
 
+    // Follow the pilot from the start when requested via the `auto-tracking` attribute.
+    if (autoTracking && viewer.getTrack()) {
+      viewer.setTracking(true);
+      syncTrackingUi();
+    }
+
+    // Start with the selected track scrolled into view in the tracks list.
+    renderTracksList(viewer.getTrack()?.id ?? null, viewer.playback.getCurrentSeconds(), true);
+
     let trackingOrbiting = false;
     let trackingOrbitPointerId: number | null = null;
     let trackingOrbitLastX = 0;
     let trackingOrbitLastY = 0;
+    // Touch pinch-zoom while tracking: wheel zoom has no touch equivalent, so track
+    // active touch points and convert pinch separation into tracking zoom.
+    const trackingTouchPoints = new Map<number, { x: number; y: number }>();
+    let trackingPinchLastDistance: number | null = null;
+    // Pinch separation pixels feel weaker than wheel deltaY pixels; scale up so a
+    // full-screen pinch spans a useful zoom range.
+    const TRACKING_PINCH_ZOOM_SCALE = 3;
+    // Touch double-tap releases tracking (mirrors the dblclick handler below, which
+    // never fires for touch because the pointerdown handler calls preventDefault,
+    // suppressing synthesized mouse events). Taps on a pilot label are excluded from
+    // tap tracking, so a double-tap on a pilot label won't release tracking.
+    const TRACKING_TAP_MAX_MS = 300;
+    const TRACKING_TAP_SLOP_PX = 24;
+    const TRACKING_DOUBLE_TAP_MS = 350;
+    const TRACKING_DOUBLE_TAP_SLOP_PX = 64;
+    let trackingTapStart: { pointerId: number; x: number; y: number; time: number } | null = null;
+    let trackingLastTap: { x: number; y: number; time: number } | null = null;
 
     canvas.addEventListener('contextmenu', (e) => {
       if (!viewer.isTracking()) return;
@@ -2418,18 +2579,54 @@ class IGCViewerElement extends HTMLElement {
     canvas.addEventListener('pointerdown', (e) => {
       if (!viewer.isTracking()) return;
       if (e.button !== 0 && e.button !== 2) return;
-      if (e.button === 0 && pilotHudOverlay.hitTest(e.clientX, e.clientY) !== null) return;
+      // Drags starting on a pilot label orbit the camera like anywhere else; a
+      // clean release still selects the pilot via the label click handler. That
+      // handler listens in the bubble phase on this same canvas, and capture-phase
+      // listeners run first at the target — so stopPropagation here would keep the
+      // label press from ever reaching it.
+      const onPilotLabel = e.button === 0 && pilotHudOverlay.hitTest(e.clientX, e.clientY) !== null;
       e.preventDefault();
-      e.stopPropagation();
+      if (!onPilotLabel) e.stopPropagation();
+      if (e.pointerType === 'touch') {
+        trackingTouchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        trackingPinchLastDistance = null;
+        if (trackingTouchPoints.size === 1) {
+          trackingTapStart = onPilotLabel
+            ? null
+            : { pointerId: e.pointerId, x: e.clientX, y: e.clientY, time: performance.now() };
+        } else {
+          // A second finger makes this a pinch, not a tap.
+          trackingTapStart = null;
+          trackingLastTap = null;
+        }
+      }
       if (!viewer.beginTrackingOrbit()) return;
       trackingOrbiting = true;
-      trackingOrbitPointerId = e.pointerId;
-      trackingOrbitLastX = e.clientX;
-      trackingOrbitLastY = e.clientY;
+      // A second touch starts a pinch — keep the first finger as the orbit pointer.
+      if (trackingTouchPoints.size <= 1) {
+        trackingOrbitPointerId = e.pointerId;
+        trackingOrbitLastX = e.clientX;
+        trackingOrbitLastY = e.clientY;
+      }
       canvas.setPointerCapture(e.pointerId);
     }, { capture: true });
     canvas.addEventListener('pointermove', (e) => {
       if (!trackingOrbiting) return;
+      if (e.pointerType === 'touch' && trackingTouchPoints.has(e.pointerId)) {
+        trackingTouchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (trackingTouchPoints.size === 2) {
+          e.preventDefault();
+          e.stopPropagation();
+          const [p0, p1] = [...trackingTouchPoints.values()];
+          const distance = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+          if (trackingPinchLastDistance !== null) {
+            // Separation growing = zoom in = negative wheel delta.
+            viewer.adjustTrackingZoom((trackingPinchLastDistance - distance) * TRACKING_PINCH_ZOOM_SCALE);
+          }
+          trackingPinchLastDistance = distance;
+          return;
+        }
+      }
       if (trackingOrbitPointerId !== e.pointerId) return;
       e.preventDefault();
       e.stopPropagation();
@@ -2452,22 +2649,65 @@ class IGCViewerElement extends HTMLElement {
       viewer.setTracking(false);
       syncTrackingUi();
     });
+    // Returns true when the pointer belonged to the tracking gesture and was handled.
+    const releaseTrackingPointer = (e: PointerEvent): boolean => {
+      const wasPinchTouch = e.pointerType === 'touch' && trackingTouchPoints.delete(e.pointerId);
+      trackingPinchLastDistance = null;
+      if (!trackingOrbiting) return false;
+      if (trackingOrbitPointerId === e.pointerId) {
+        const remaining = trackingTouchPoints.entries().next();
+        if (!remaining.done) {
+          // Orbit finger lifted mid-pinch — hand the orbit to the remaining finger.
+          const [id, p] = remaining.value;
+          trackingOrbitPointerId = id;
+          trackingOrbitLastX = p.x;
+          trackingOrbitLastY = p.y;
+        } else {
+          trackingOrbiting = false;
+          trackingOrbitPointerId = null;
+          viewer.endTrackingOrbit();
+        }
+        if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+        return true;
+      }
+      if (wasPinchTouch) {
+        if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+        return true;
+      }
+      return false;
+    };
+
     canvas.addEventListener('pointerup', (e) => {
-      if (!trackingOrbiting || trackingOrbitPointerId !== e.pointerId) return;
+      const tapStart = trackingTapStart;
+      if (!releaseTrackingPointer(e)) return;
       e.preventDefault();
       e.stopPropagation();
-      trackingOrbiting = false;
-      trackingOrbitPointerId = null;
-      viewer.endTrackingOrbit();
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      if (!tapStart || tapStart.pointerId !== e.pointerId) return;
+      trackingTapStart = null;
+      const now = performance.now();
+      const isTap = now - tapStart.time <= TRACKING_TAP_MAX_MS
+        && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) <= TRACKING_TAP_SLOP_PX;
+      if (!isTap) {
+        trackingLastTap = null;
+        return;
+      }
+      // Window runs from the first tap's release to the second tap's press.
+      const isDoubleTap = trackingLastTap !== null
+        && tapStart.time - trackingLastTap.time <= TRACKING_DOUBLE_TAP_MS
+        && Math.hypot(tapStart.x - trackingLastTap.x, tapStart.y - trackingLastTap.y) <= TRACKING_DOUBLE_TAP_SLOP_PX;
+      if (isDoubleTap) {
+        trackingLastTap = null;
+        viewer.setTracking(false);
+        syncTrackingUi();
+      } else {
+        trackingLastTap = { x: e.clientX, y: e.clientY, time: now };
+      }
     });
     canvas.addEventListener('pointercancel', (e) => {
-      if (!trackingOrbiting || trackingOrbitPointerId !== e.pointerId) return;
+      trackingTapStart = null;
+      trackingLastTap = null;
+      if (!releaseTrackingPointer(e)) return;
       e.stopPropagation();
-      trackingOrbiting = false;
-      trackingOrbitPointerId = null;
-      viewer.endTrackingOrbit();
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     });
 
     function bindSectionToggle(btnSel: string) {
