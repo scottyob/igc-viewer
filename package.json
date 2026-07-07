@@ -1,7 +1,7 @@
 {
   "name": "igc-viewer",
   "type": "module",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "3D paragliding and flight track viewer — Google Photorealistic 3D Tiles, Three.js WebGPU, framework-agnostic web component",
   "keywords": [
     "igc",
