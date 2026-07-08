@@ -3,6 +3,7 @@ import { createTimeline } from './components/IGCViewer/setupTimeline';
 import { detectAndParse } from './components/IGCViewer/parseLandmarks';
 import { looksLikeOpenAir, parseOpenAir } from './components/IGCViewer/parseAirspace';
 import { airspaceClassLabel, airspaceColor } from './components/IGCViewer/setupAirspace';
+import type { MapTileSource } from './components/IGCViewer/mapOverlay';
 import { formatAltitudeM } from './components/IGCViewer/formatUnits';
 import { sampleTerrainElevationM } from './components/IGCViewer/terrainElevation';
 import { llaToECEF } from './components/IGCViewer/igc';
@@ -107,6 +108,101 @@ const SHADOW_CSS = `
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* ── Map tiles button + menu ──────────────────────────────────────────── */
+.igc-tiles-btn {
+  position: absolute;
+  top: 68px;
+  left: 16px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: opacity 0.2s;
+  opacity: 0.85;
+  z-index: 10;
+}
+.igc-tiles-btn:hover { opacity: 1; }
+.igc-tiles-btn svg { width: 100%; height: 100%; display: block; }
+
+.igc-tiles-menu {
+  position: absolute;
+  top: 68px;
+  left: 68px;
+  z-index: 30;
+  min-width: 230px;
+  background: rgba(12, 12, 20, 0.95);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 8px 0;
+  font-size: 12px;
+  color: rgba(255,255,255,0.85);
+}
+.igc-tiles-menu-label {
+  padding: 4px 14px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.35);
+}
+.igc-tiles-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.igc-tiles-source:hover { background: rgba(255,255,255,0.08); }
+.igc-tiles-source input[type="radio"] {
+  width: 13px;
+  height: 13px;
+  accent-color: #50c8ff;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.igc-tiles-custom { padding: 6px 14px 4px; }
+.igc-tiles-custom input[type="text"] {
+  width: 100%;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  color: rgba(255,255,255,0.85);
+  font-size: 11px;
+  padding: 5px 7px;
+  outline: none;
+}
+.igc-tiles-custom input[type="text"]:focus { border-color: #50c8ff; }
+.igc-tiles-opacity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 4px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  margin-top: 6px;
+}
+.igc-tiles-opacity input[type="range"] { flex: 1; accent-color: #50c8ff; }
+
+.igc-map-attribution {
+  position: absolute;
+  right: calc(var(--igc-sidebar-w, 0px) + 8px);
+  bottom: 144px;
+  z-index: 15;
+  font-size: 10px;
+  color: rgba(255,255,255,0.75);
+  background: rgba(0,0,0,0.45);
+  border-radius: 3px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+@media (max-width: 900px) {
+  .igc-map-attribution { bottom: 104px; }
 }
 
 /* ── Timeline (bottom bar) ────────────────────────────────────────────── */
@@ -981,6 +1077,26 @@ const SHADOW_HTML = `
   </div>
 
   <input type="file" class="igc-file-input" accept=".igc,.wpt,.cup,.txt,.openair,.air" multiple hidden>
+  <button class="igc-tiles-btn" title="Map overlay tiles">
+    <svg viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="22" cy="22" r="20" fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+      <path d="M22 12 32 17.5 22 23 12 17.5z" fill="#fff" opacity="0.9"/>
+      <path d="M12 22.5 22 28 32 22.5" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" opacity="0.65"/>
+      <path d="M12 27.5 22 33 32 27.5" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" opacity="0.4"/>
+    </svg>
+  </button>
+  <div class="igc-tiles-menu" hidden>
+    <div class="igc-tiles-menu-label">Map overlay</div>
+    <div class="igc-tiles-sources"></div>
+    <div class="igc-tiles-custom">
+      <input type="text" class="igc-tiles-custom-input" placeholder="Custom: https://…/{z}/{x}/{y}.png" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="igc-tiles-opacity">
+      <span>Opacity</span>
+      <input type="range" class="igc-tiles-opacity-input" min="10" max="100" value="75">
+    </div>
+  </div>
+  <div class="igc-map-attribution" hidden></div>
   <button class="igc-file-btn" title="Open IGC file">
     <svg viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
       <circle cx="22" cy="22" r="20" fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
@@ -2283,6 +2399,70 @@ class IGCViewerElement extends HTMLElement {
     canvas.addEventListener('pointercancel', () => {
       airspaceTapCandidate = null;
     });
+
+    // ── Map overlay tiles menu ───────────────────────────────────────────
+    const tilesBtn = root.querySelector<HTMLButtonElement>('.igc-tiles-btn')!;
+    const tilesMenu = root.querySelector<HTMLElement>('.igc-tiles-menu')!;
+    const tilesSourcesEl = root.querySelector<HTMLElement>('.igc-tiles-sources')!;
+    const tilesCustomInput = root.querySelector<HTMLInputElement>('.igc-tiles-custom-input')!;
+    const tilesOpacityInput = root.querySelector<HTMLInputElement>('.igc-tiles-opacity-input')!;
+    const mapAttributionEl = root.querySelector<HTMLElement>('.igc-map-attribution')!;
+
+    function renderTileSources() {
+      const current = viewer.mapTiles.getSource();
+      tilesSourcesEl.innerHTML = '';
+      const options: Array<MapTileSource | null> = [null, ...viewer.mapTiles.getSources()];
+      if (current && current.id === 'custom') options.push(current);
+      for (const source of options) {
+        const row = document.createElement('label');
+        row.className = 'igc-tiles-source';
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'igc-tiles-source';
+        radio.checked = (source?.id ?? null) === (current?.id ?? null);
+        radio.addEventListener('change', () => applyMapSource(source));
+        const label = document.createElement('span');
+        label.textContent = source?.label ?? 'None';
+        row.append(radio, label);
+        tilesSourcesEl.append(row);
+      }
+    }
+
+    function applyMapSource(source: MapTileSource | null) {
+      viewer.mapTiles.setSource(source);
+      const attribution = source?.attribution ?? '';
+      mapAttributionEl.hidden = attribution === '';
+      mapAttributionEl.textContent = attribution;
+      renderTileSources();
+    }
+
+    tilesBtn.addEventListener('click', () => {
+      tilesMenu.hidden = !tilesMenu.hidden;
+      if (!tilesMenu.hidden) renderTileSources();
+    });
+    this.#shadow.addEventListener('pointerdown', (e) => {
+      if (tilesMenu.hidden) return;
+      const path = e.composedPath();
+      if (!path.includes(tilesMenu) && !path.includes(tilesBtn)) tilesMenu.hidden = true;
+    });
+
+    tilesCustomInput.addEventListener('change', () => {
+      const template = tilesCustomInput.value.trim();
+      if (!template) return;
+      if (!template.includes('{z}') || !template.includes('{x}') || !template.includes('{y}')) {
+        tilesCustomInput.setCustomValidity('Template must contain {z}, {x} and {y}');
+        tilesCustomInput.reportValidity();
+        return;
+      }
+      tilesCustomInput.setCustomValidity('');
+      applyMapSource({ id: 'custom', label: 'Custom', template, maxZoom: 18, attribution: '' });
+    });
+
+    tilesOpacityInput.addEventListener('input', () => {
+      viewer.mapTiles.setOpacity(Number(tilesOpacityInput.value) / 100);
+    });
+
+    renderTileSources();
 
     const tracksListEl = root.querySelector<HTMLElement>('.igc-tracks-list')!;
     const trackSearchWrap = root.querySelector<HTMLElement>('.igc-track-search')!;

@@ -28,6 +28,14 @@ import { parseTask } from './parseTask';
 import { detectAndParse } from './parseLandmarks';
 import { looksLikeOpenAir, parseOpenAir } from './parseAirspace';
 import { createAirspaceManager } from './setupAirspace';
+import {
+  MAP_TILE_SOURCES,
+  getMapOverlayOpacity,
+  getMapTileSource,
+  setMapOverlayOpacity,
+  setMapTileSource,
+} from './mapOverlay';
+import type { MapTileSource } from './mapOverlay';
 import { sampleCachedTerrainElevationM, sampleTerrainBoundsInRadiusM, sampleTerrainElevationM } from './terrainElevation';
 import type { IGCTask } from './parseTask';
 import type { FlightTrack, HeightCalculationMode, ViewerOptions } from './types';
@@ -39,6 +47,7 @@ export type { AltitudeMarkerMode, HeightCalculationMode, LandmarkEntry, TrackEnt
 export type { Landmark } from './parseLandmarks';
 export type { Airspace, AirspaceAltitude } from './parseAirspace';
 export type { AirspaceFile, AirspacePick } from './setupAirspace';
+export type { MapTileSource } from './mapOverlay';
 
 export interface LandmarkFile {
   id: string;
@@ -1018,6 +1027,15 @@ export async function initViewer(options: ViewerOptions) {
     },
     setOnAirspacesChange(cb: () => void) {
       onAirspacesChangeCallback = cb;
+    },
+
+    /** Raster map overlays (OSM, thermal maps, custom XYZ) painted on the terrain. */
+    mapTiles: {
+      getSources(): readonly MapTileSource[] { return MAP_TILE_SOURCES; },
+      setSource(source: MapTileSource | null): void { setMapTileSource(source); },
+      getSource: getMapTileSource,
+      setOpacity: setMapOverlayOpacity,
+      getOpacity: getMapOverlayOpacity,
     },
 
     /** Pick the airspace zone at normalized device coords (-1..1). Ground zones
