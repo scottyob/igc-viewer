@@ -30,10 +30,11 @@ import { looksLikeOpenAir, parseOpenAir } from './parseAirspace';
 import { createAirspaceManager } from './setupAirspace';
 import {
   MAP_TILE_SOURCES,
+  ecefToGeodetic,
+  getActiveMapSources,
   getMapOverlayOpacity,
-  getMapTileSource,
+  setActiveMapSources,
   setMapOverlayOpacity,
-  setMapTileSource,
 } from './mapOverlay';
 import type { MapTileSource } from './mapOverlay';
 import { sampleCachedTerrainElevationM, sampleTerrainBoundsInRadiusM, sampleTerrainElevationM } from './terrainElevation';
@@ -570,7 +571,15 @@ export async function initViewer(options: ViewerOptions) {
     }
   }
 
-  async function zoomCameraToGroundClearance(clearanceM: number): Promise<void> {
+  // Geodetic height above the WGS84 ellipsoid (valid away from the poles).
+  function geodeticHeightM(p: Vector3): number {
+    const { latRad } = ecefToGeodetic(p);
+    const a = 6378137.0, e2 = 0.00669437999014;
+    const N = a / Math.sqrt(1 - e2 * Math.sin(latRad) ** 2);
+    return Math.sqrt(p.x * p.x + p.y * p.y) / Math.cos(latRad) - N;
+  }
+
+  async function zoomCameraToGroundClearance(clearanceM: number, neverDescend = false): Promise<void> {
     const lookDirection = new Vector3();
     camera.getWorldDirection(lookDirection);
 
@@ -596,6 +605,16 @@ export async function initViewer(options: ViewerOptions) {
       const targetAltitudeM = (terrainAltitudeM ?? 0) + clearanceM;
       targetPosition = llaToECEF(lat, lon, targetAltitudeM);
       targetLookAt = llaToECEF(lat, lon, terrainAltitudeM ?? 0);
+    }
+
+    // Never-descend mode (compass view): re-orient top-down but keep the current
+    // altitude when it's already above the requested clearance.
+    if (neverDescend) {
+      const currentHeight = geodeticHeightM(camera.position);
+      const targetHeight = geodeticHeightM(targetPosition);
+      if (targetHeight < currentHeight) {
+        targetPosition.addScaledVector(targetPosition.clone().normalize(), currentHeight - targetHeight);
+      }
     }
 
     const up = targetPosition.clone().normalize();
@@ -756,7 +775,18 @@ export async function initViewer(options: ViewerOptions) {
     updateTaskObjects(playback.currentSeconds);
 
     globeControls.update();
-    // GlobeControls.update() adaptively sets camera near/far based on the horizon distance.
+    // GlobeControls.update() early-returns while disabled (fly-to animations, tracking
+    // mode), which would leave stale near/far from the previous camera position — the
+    // whole scene ends up near-plane-culled after big jumps (e.g. globe → first track).
+    // Keep clip planes fresh ourselves; adjustHeight off skips terrain clamping so we
+    // don't fight scripted camera positions.
+    if (!globeControls.controls.enabled) {
+      const prevAdjustHeight = globeControls.controls.adjustHeight;
+      globeControls.controls.adjustHeight = false;
+      globeControls.controls.adjustCamera(camera);
+      globeControls.controls.adjustHeight = prevAdjustHeight;
+    }
+    // GlobeControls adaptively sets camera near/far based on the horizon distance.
     // Only override when fancy lighting is on — CSM requires a fixed frustum for shadow maps.
     if (fancyLighting) {
       applyShadowSafeClip(camera);
@@ -784,6 +814,7 @@ export async function initViewer(options: ViewerOptions) {
     scene,
     camera,
     renderer,
+    controls: globeControls.controls,
 
     addPostRenderCallback(cb: () => void): () => void {
       postRenderCallbacks.add(cb);
@@ -1029,11 +1060,12 @@ export async function initViewer(options: ViewerOptions) {
       onAirspacesChangeCallback = cb;
     },
 
-    /** Raster map overlays (OSM, thermal maps, custom XYZ) painted on the terrain. */
+    /** Raster map overlays (OSM, thermal maps, custom XYZ) painted on the terrain.
+     *  Multiple layers may be active at once; they composite in stacking order. */
     mapTiles: {
       getSources(): readonly MapTileSource[] { return MAP_TILE_SOURCES; },
-      setSource(source: MapTileSource | null): void { setMapTileSource(source); },
-      getSource: getMapTileSource,
+      setActive(sources: MapTileSource[]): void { setActiveMapSources(sources); },
+      getActive: getActiveMapSources,
       setOpacity: setMapOverlayOpacity,
       getOpacity: getMapOverlayOpacity,
     },

@@ -126,7 +126,7 @@ function updateMeshMap(mesh: Mesh, entry: MeshEntry): void {
 
   void buildMapRaster(minX, minY, maxX, maxY).then((raster) => {
     const stale = entry.geometryDisposed || gen !== entry.mapGen || version !== mapOverlayVersion();
-    if (stale || (raster && seed && raster.z === seed.z)) {
+    if (stale || (raster && seed && raster.signature === seed.signature)) {
       // Stale, or the seed was already assembled from the same tiles.
       raster?.texture.dispose();
       return;

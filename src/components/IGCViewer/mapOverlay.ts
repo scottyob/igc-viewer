@@ -25,22 +25,14 @@ import { atan, float, log, mix, positionWorld, sqrt, texture, uniform, vec2 } fr
 export interface MapTileSource {
   id: string;
   label: string;
-  /** XYZ URL template with {z}, {x}, {y} placeholders. */
+  /** XYZ URL template with {z}, {x}, {y} placeholders ({-y} for TMS south-origin Y). */
   template: string;
   maxZoom: number;
   attribution: string;
 }
 
+// Listed in stacking order: earlier sources draw first (underneath).
 export const MAP_TILE_SOURCES: MapTileSource[] = [
-  {
-    // Transparent roads-only reference layer, designed for overlaying imagery.
-    // Rural coverage runs out above z15 — deeper views upscale z15 tiles.
-    id: 'esri-roads',
-    label: 'Roads',
-    template: 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
-    maxZoom: 15,
-    attribution: 'Esri, HERE, Garmin',
-  },
   {
     id: 'osm',
     label: 'OpenStreetMap',
@@ -49,18 +41,28 @@ export const MAP_TILE_SOURCES: MapTileSource[] = [
     attribution: '© OpenStreetMap contributors',
   },
   {
+    // kk7 serves TMS-scheme tiles (south-origin Y) — hence {-y}.
     id: 'kk7-thermals',
     label: 'Thermals (kk7)',
-    template: 'https://thermal.kk7.ch/tiles/thermals_all_all/{z}/{x}/{y}.png?src=github.com/scottyob/igc-viewer',
+    template: 'https://thermal.kk7.ch/tiles/thermals_all_all/{z}/{x}/{-y}.png?src=github.com/scottyob/igc-viewer',
     maxZoom: 12,
     attribution: 'thermal.kk7.ch',
   },
   {
     id: 'kk7-skyways',
     label: 'Skyways (kk7)',
-    template: 'https://thermal.kk7.ch/tiles/skyways_all_all/{z}/{x}/{y}.png?src=github.com/scottyob/igc-viewer',
+    template: 'https://thermal.kk7.ch/tiles/skyways_all_all/{z}/{x}/{-y}.png?src=github.com/scottyob/igc-viewer',
     maxZoom: 12,
     attribution: 'thermal.kk7.ch',
+  },
+  {
+    // Transparent roads-only reference layer, designed for overlaying imagery.
+    // Rural coverage runs out above z15 — deeper views upscale z15 tiles.
+    id: 'esri-roads',
+    label: 'Roads',
+    template: 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+    maxZoom: 15,
+    attribution: 'Esri, HERE, Garmin',
   },
 ];
 
@@ -71,7 +73,9 @@ const MAX_MERC_LAT = 85.05112878;
 
 // ── State ────────────────────────────────────────────────────────────────
 
-let activeSource: MapTileSource | null = null;
+// Roads are on by default — a transparent reference layer that helps orient
+// without obscuring the imagery.
+let activeSources: MapTileSource[] = MAP_TILE_SOURCES.filter((s) => s.id === 'esri-roads');
 let version = 0;
 const opacityU = uniform(0.75);
 
@@ -79,13 +83,18 @@ export function mapOverlayVersion(): number {
   return version;
 }
 
-export function setMapTileSource(source: MapTileSource | null): void {
-  activeSource = source;
+/** Replace the set of active overlay layers (kept in MAP_TILE_SOURCES stacking order, unknown ids last). */
+export function setActiveMapSources(sources: MapTileSource[]): void {
+  const order = (s: MapTileSource) => {
+    const i = MAP_TILE_SOURCES.findIndex((p) => p.id === s.id);
+    return i === -1 ? MAP_TILE_SOURCES.length : i;
+  };
+  activeSources = [...sources].sort((a, b) => order(a) - order(b));
   version++;
 }
 
-export function getMapTileSource(): MapTileSource | null {
-  return activeSource;
+export function getActiveMapSources(): readonly MapTileSource[] {
+  return activeSources;
 }
 
 export function setMapOverlayOpacity(v: number): void {
@@ -230,7 +239,8 @@ export function createMapOverlayColorNode(baseColor: any): { colorNode: any; han
 
 export interface MapRaster {
   texture: CanvasTexture;
-  z: number;
+  /** Layer/zoom composition key — identical signature means identical content. */
+  signature: string;
   minX: number;
   minY: number;
   maxX: number;
@@ -256,7 +266,11 @@ function gridForRect(source: MapTileSource, minX: number, minY: number, maxX: nu
   for (let ty = y0; ty <= y1; ty++) {
     for (let tx = x0; tx <= x1; tx++) {
       tiles.push({
-        url: source.template.replace('{z}', String(z)).replace('{x}', String(tx)).replace('{y}', String(ty)),
+        url: source.template
+          .replace('{z}', String(z))
+          .replace('{x}', String(tx))
+          .replace('{-y}', String(n - 1 - ty)) // TMS south-origin Y
+          .replace('{y}', String(ty)),
         tx, ty,
       });
     }
@@ -276,15 +290,50 @@ function targetZoom(source: MapTileSource, minX: number, minY: number, maxX: num
   return z;
 }
 
-function assembleGrid(grid: TileGrid, bitmaps: (ImageBitmap | null)[]): MapRaster {
+interface LayerPlan {
+  source: MapTileSource;
+  grid: TileGrid;
+}
+
+function clampRect(minX: number, minY: number, maxX: number, maxY: number): [number, number, number, number] | null {
+  // Slight pad so linear filtering at the rect edge doesn't bleed a hard cut.
+  const padX = (maxX - minX) * 0.01;
+  const padY = (maxY - minY) * 0.01;
+  const cMinX = Math.max(0, minX - padX), cMinY = Math.max(0, minY - padY);
+  const cMaxX = Math.min(1, maxX + padX), cMaxY = Math.min(1, maxY + padY);
+  return cMaxX <= cMinX || cMaxY <= cMinY ? null : [cMinX, cMinY, cMaxX, cMaxY];
+}
+
+function signatureOf(plans: LayerPlan[]): string {
+  return plans.map((p) => `${p.source.id}:${p.grid.z}`).join('|');
+}
+
+/** Composite every planned layer (in stacking order) into one canvas over `rect`. */
+function assembleLayers(rect: [number, number, number, number], plans: LayerPlan[], bitmaps: (ImageBitmap | null)[][]): MapRaster {
+  const [minX, minY, maxX, maxY] = rect;
+  const rectW = maxX - minX;
+  const rectH = maxY - minY;
+  const zMax = Math.max(...plans.map((p) => p.grid.z));
+  const pxPerUnit = 2 ** zMax * TILE_PX;
   const canvas = document.createElement('canvas');
-  canvas.width = (grid.x1 - grid.x0 + 1) * TILE_PX;
-  canvas.height = (grid.y1 - grid.y0 + 1) * TILE_PX;
+  canvas.width = Math.min(800, Math.max(2, Math.round(rectW * pxPerUnit)));
+  canvas.height = Math.min(800, Math.max(2, Math.round(rectH * pxPerUnit)));
   const ctx = canvas.getContext('2d')!;
-  for (let i = 0; i < grid.tiles.length; i++) {
-    const bmp = bitmaps[i];
-    if (!bmp) continue;
-    ctx.drawImage(bmp, (grid.tiles[i].tx - grid.x0) * TILE_PX, (grid.tiles[i].ty - grid.y0) * TILE_PX);
+
+  // Canvas rows top-down = north to south, same direction as mercator Y.
+  for (let p = 0; p < plans.length; p++) {
+    const { grid } = plans[p];
+    const n = 2 ** grid.z;
+    for (let i = 0; i < grid.tiles.length; i++) {
+      const bmp = bitmaps[p][i];
+      if (!bmp) continue;
+      const { tx, ty } = grid.tiles[i];
+      const dx = ((tx / n - minX) / rectW) * canvas.width;
+      const dy = ((ty / n - minY) / rectH) * canvas.height;
+      const dw = (1 / n / rectW) * canvas.width;
+      const dh = (1 / n / rectH) * canvas.height;
+      ctx.drawImage(bmp, dx, dy, dw, dh);
+    }
   }
 
   const tex = new CanvasTexture(canvas);
@@ -296,58 +345,57 @@ function assembleGrid(grid: TileGrid, bitmaps: (ImageBitmap | null)[]): MapRaste
   tex.generateMipmaps = true;
   tex.anisotropy = 4;
 
-  const n = 2 ** grid.z;
-  return {
-    texture: tex,
-    z: grid.z,
-    minX: grid.x0 / n,
-    minY: grid.y0 / n,
-    maxX: (grid.x1 + 1) / n,
-    maxY: (grid.y1 + 1) / n,
-  };
-}
-
-function clampRect(minX: number, minY: number, maxX: number, maxY: number): [number, number, number, number] | null {
-  const cMinX = Math.max(0, minX), cMinY = Math.max(0, minY);
-  const cMaxX = Math.min(1, maxX), cMaxY = Math.min(1, maxY);
-  return cMaxX <= cMinX || cMaxY <= cMinY ? null : [cMinX, cMinY, cMaxX, cMaxY];
+  return { texture: tex, signature: signatureOf(plans), minX, minY, maxX, maxY };
 }
 
 /**
- * Synchronous best-effort raster from tiles already in the cache, walking up
- * to coarser zooms until a fully settled level is found. Used to seed freshly
- * loaded 3D tiles instantly (no overlay flicker while exact tiles download).
+ * Synchronous best-effort raster from tiles already in the cache. Each active
+ * layer independently falls back to the nearest fully-settled coarser zoom
+ * (usually the parent 3D tile's). Used to seed freshly loaded 3D tiles
+ * instantly, so LOD churn never blinks the overlay off.
  */
 export function assembleMapRasterFromCache(minX: number, minY: number, maxX: number, maxY: number): MapRaster | null {
-  const source = activeSource;
-  if (!source) return null;
+  if (activeSources.length === 0) return null;
   const rect = clampRect(minX, minY, maxX, maxY);
   if (!rect) return null;
 
-  const zTarget = targetZoom(source, ...rect);
-  for (let z = zTarget; z >= Math.max(0, zTarget - 8); z--) {
-    const grid = gridForRect(source, rect[0], rect[1], rect[2], rect[3], z);
-    if (grid.tiles.length === 0) return null;
-    const bitmaps = grid.tiles.map((t) => cachedTile(t.url));
-    if (bitmaps.some((b) => b === undefined)) continue; // level not fully settled
-    return assembleGrid(grid, bitmaps as (ImageBitmap | null)[]);
+  const plans: LayerPlan[] = [];
+  const bitmaps: (ImageBitmap | null)[][] = [];
+  for (const source of activeSources) {
+    const zTarget = targetZoom(source, ...rect);
+    for (let z = zTarget; z >= Math.max(0, zTarget - 8); z--) {
+      const grid = gridForRect(source, rect[0], rect[1], rect[2], rect[3], z);
+      if (grid.tiles.length === 0) break;
+      const level = grid.tiles.map((t) => cachedTile(t.url));
+      if (level.some((b) => b === undefined)) continue; // level not fully settled
+      plans.push({ source, grid });
+      bitmaps.push(level as (ImageBitmap | null)[]);
+      break;
+    }
   }
-  return null;
+  if (plans.length === 0) return null;
+  return assembleLayers(rect, plans, bitmaps);
 }
 
 /**
- * Assemble the slippy tiles covering a mercator-unit rectangle into one
- * canvas. Resolves null when the overlay is off or nothing could be fetched.
+ * Fetch + composite all active layers covering a mercator-unit rectangle.
+ * Resolves null when no layers are active or nothing could be fetched.
  */
 export async function buildMapRaster(minX: number, minY: number, maxX: number, maxY: number): Promise<MapRaster | null> {
-  const source = activeSource;
-  if (!source) return null;
+  const sources = activeSources;
+  const startVersion = version;
+  if (sources.length === 0) return null;
   const rect = clampRect(minX, minY, maxX, maxY);
   if (!rect) return null;
 
-  const grid = gridForRect(source, ...rect, targetZoom(source, ...rect));
-  const bitmaps = await Promise.all(grid.tiles.map((t) => fetchTile(t.url).promise));
-  if (activeSource !== source) return null; // source changed while fetching
-  if (bitmaps.every((b) => b === null)) return null;
-  return assembleGrid(grid, bitmaps);
+  const plans: LayerPlan[] = sources.map((source) => ({
+    source,
+    grid: gridForRect(source, ...rect, targetZoom(source, ...rect)),
+  }));
+  const bitmaps = await Promise.all(
+    plans.map((p) => Promise.all(p.grid.tiles.map((t) => fetchTile(t.url).promise))),
+  );
+  if (version !== startVersion) return null; // layer set changed while fetching
+  if (bitmaps.every((level) => level.every((b) => b === null))) return null;
+  return assembleLayers(rect, plans, bitmaps);
 }

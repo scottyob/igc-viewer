@@ -169,6 +169,7 @@ const SHADOW_CSS = `
 }
 .igc-tiles-custom { padding: 6px 14px 4px; }
 .igc-tiles-custom input[type="text"] {
+  box-sizing: border-box;
   width: 100%;
   background: rgba(255,255,255,0.07);
   border: 1px solid rgba(255,255,255,0.12);
@@ -1086,7 +1087,7 @@ const SHADOW_HTML = `
     </svg>
   </button>
   <div class="igc-tiles-menu" hidden>
-    <div class="igc-tiles-menu-label">Map overlay</div>
+    <div class="igc-tiles-menu-label">Map overlays</div>
     <div class="igc-tiles-sources"></div>
     <div class="igc-tiles-custom">
       <input type="text" class="igc-tiles-custom-input" placeholder="Custom: https://…/{z}/{x}/{y}.png" spellcheck="false" autocomplete="off">
@@ -1961,7 +1962,9 @@ class IGCViewerElement extends HTMLElement {
     const tracks = parseJsonAttribute<TrackEntry[]>(this, 'tracks', []);
     const landmarks = parseJsonAttribute<LandmarkEntry[]>(this, 'landmarks', []);
     const airspaces = parseJsonAttribute<LandmarkEntry[]>(this, 'airspaces', []);
-    const autoTracking = this.hasAttribute('auto-tracking');
+    // Treat auto-tracking="false" as off — frameworks may render the attribute with a literal value.
+    const autoTrackingAttr = this.getAttribute('auto-tracking');
+    const autoTracking = autoTrackingAttr !== null && autoTrackingAttr !== 'false';
 
     const root = this.#shadow.querySelector<HTMLElement>('.igc-root')!;
     root.dataset.apiKey = apiKey; // read by createTimeline for Timezone API calls
@@ -2107,7 +2110,7 @@ class IGCViewerElement extends HTMLElement {
         viewer.setTracking(false);
         syncTrackingUi();
       }
-      void viewer.zoomCameraToGroundClearance(3000).catch((err) => console.warn('[IGC] failed to zoom compass view:', err));
+      void viewer.zoomCameraToGroundClearance(3000, true).catch((err) => console.warn('[IGC] failed to zoom compass view:', err));
     };
 
     canvas.addEventListener('pointerdown', (e) => {
@@ -2408,32 +2411,40 @@ class IGCViewerElement extends HTMLElement {
     const tilesOpacityInput = root.querySelector<HTMLInputElement>('.igc-tiles-opacity-input')!;
     const mapAttributionEl = root.querySelector<HTMLElement>('.igc-map-attribution')!;
 
+    let customTileSource: MapTileSource | null = null;
+
+    function toggleMapSource(source: MapTileSource, enabled: boolean) {
+      const active = viewer.mapTiles.getActive().filter((s) => s.id !== source.id);
+      viewer.mapTiles.setActive(enabled ? [...active, source] : [...active]);
+      syncMapAttribution();
+      renderTileSources();
+    }
+
+    function syncMapAttribution() {
+      const attributions = [...new Set(
+        viewer.mapTiles.getActive().map((s) => s.attribution).filter((a) => a !== ''),
+      )];
+      mapAttributionEl.hidden = attributions.length === 0;
+      mapAttributionEl.textContent = attributions.join(' · ');
+    }
+
     function renderTileSources() {
-      const current = viewer.mapTiles.getSource();
+      const activeIds = new Set(viewer.mapTiles.getActive().map((s) => s.id));
       tilesSourcesEl.innerHTML = '';
-      const options: Array<MapTileSource | null> = [null, ...viewer.mapTiles.getSources()];
-      if (current && current.id === 'custom') options.push(current);
+      const options: MapTileSource[] = [...viewer.mapTiles.getSources()];
+      if (customTileSource) options.push(customTileSource);
       for (const source of options) {
         const row = document.createElement('label');
         row.className = 'igc-tiles-source';
-        const radio = document.createElement('input');
-        radio.type = 'radio';
-        radio.name = 'igc-tiles-source';
-        radio.checked = (source?.id ?? null) === (current?.id ?? null);
-        radio.addEventListener('change', () => applyMapSource(source));
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = activeIds.has(source.id);
+        checkbox.addEventListener('change', () => toggleMapSource(source, checkbox.checked));
         const label = document.createElement('span');
-        label.textContent = source?.label ?? 'None';
-        row.append(radio, label);
+        label.textContent = source.label;
+        row.append(checkbox, label);
         tilesSourcesEl.append(row);
       }
-    }
-
-    function applyMapSource(source: MapTileSource | null) {
-      viewer.mapTiles.setSource(source);
-      const attribution = source?.attribution ?? '';
-      mapAttributionEl.hidden = attribution === '';
-      mapAttributionEl.textContent = attribution;
-      renderTileSources();
     }
 
     tilesBtn.addEventListener('click', () => {
@@ -2449,13 +2460,14 @@ class IGCViewerElement extends HTMLElement {
     tilesCustomInput.addEventListener('change', () => {
       const template = tilesCustomInput.value.trim();
       if (!template) return;
-      if (!template.includes('{z}') || !template.includes('{x}') || !template.includes('{y}')) {
-        tilesCustomInput.setCustomValidity('Template must contain {z}, {x} and {y}');
+      if (!template.includes('{z}') || !template.includes('{x}') || !(template.includes('{y}') || template.includes('{-y}'))) {
+        tilesCustomInput.setCustomValidity('Template must contain {z}, {x} and {y} (or {-y})');
         tilesCustomInput.reportValidity();
         return;
       }
       tilesCustomInput.setCustomValidity('');
-      applyMapSource({ id: 'custom', label: 'Custom', template, maxZoom: 18, attribution: '' });
+      customTileSource = { id: 'custom', label: 'Custom', template, maxZoom: 18, attribution: '' };
+      toggleMapSource(customTileSource, true);
     });
 
     tilesOpacityInput.addEventListener('input', () => {
@@ -2463,6 +2475,7 @@ class IGCViewerElement extends HTMLElement {
     });
 
     renderTileSources();
+    syncMapAttribution();
 
     const tracksListEl = root.querySelector<HTMLElement>('.igc-tracks-list')!;
     const trackSearchWrap = root.querySelector<HTMLElement>('.igc-track-search')!;
