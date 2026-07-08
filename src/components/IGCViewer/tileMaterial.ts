@@ -1,6 +1,8 @@
 import { Mesh } from 'three';
 import type { Material, Object3D, Texture } from 'three';
 import { MeshBasicNodeMaterial, MeshLambertNodeMaterial } from 'three/webgpu';
+import { materialColor } from 'three/tsl';
+import { withAirspaceOverlay } from './airspaceOverlay';
 
 type MeshMats = Material | Material[];
 
@@ -14,12 +16,14 @@ function copyMap(source: Material): Texture | null {
 function makeBasic(source: Material): MeshBasicNodeMaterial {
   const mat = new MeshBasicNodeMaterial();
   mat.map = copyMap(source);
+  mat.colorNode = withAirspaceOverlay(materialColor);
   return mat;
 }
 
 function makeLambert(source: Material): MeshLambertNodeMaterial {
   const mat = new MeshLambertNodeMaterial();
   mat.map = copyMap(source);
+  mat.colorNode = withAirspaceOverlay(materialColor);
   return mat;
 }
 

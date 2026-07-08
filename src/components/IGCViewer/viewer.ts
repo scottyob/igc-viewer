@@ -10,6 +10,7 @@ import {
   Scene,
   Sprite,
   SpriteMaterial,
+  Vector2,
   Vector3,
 } from 'three';
 import { mix, positionViewDirection, vec3 } from 'three/tsl';
@@ -25,13 +26,19 @@ import { createTrackManager } from './setupTracks';
 import { llaToECEF, haversineDistanceM } from './igc';
 import { parseTask } from './parseTask';
 import { detectAndParse } from './parseLandmarks';
+import { looksLikeOpenAir, parseOpenAir } from './parseAirspace';
+import { createAirspaceManager } from './setupAirspace';
 import { sampleCachedTerrainElevationM, sampleTerrainBoundsInRadiusM, sampleTerrainElevationM } from './terrainElevation';
 import type { IGCTask } from './parseTask';
 import type { FlightTrack, HeightCalculationMode, ViewerOptions } from './types';
 import type { Landmark } from './parseLandmarks';
+import type { Airspace } from './parseAirspace';
+import type { AirspaceFile, AirspacePick } from './setupAirspace';
 
 export type { AltitudeMarkerMode, HeightCalculationMode, LandmarkEntry, TrackEntry, FlightTrack, TailMode, TrailLengthMode, UnitMode, ViewerOptions } from './types';
 export type { Landmark } from './parseLandmarks';
+export type { Airspace, AirspaceAltitude } from './parseAirspace';
+export type { AirspaceFile, AirspacePick } from './setupAirspace';
 
 export interface LandmarkFile {
   id: string;
@@ -469,6 +476,16 @@ export async function initViewer(options: ViewerOptions) {
     onLandmarksChangeCallback?.();
   }
 
+  // --- Airspace ---
+  const airspace = createAirspaceManager(scene);
+  let onAirspacesChangeCallback: (() => void) | null = null;
+  const airspacePickRay = new Raycaster();
+
+  function addAirspaceFileInternal(filename: string, rawText: string, zones: Airspace[]): void {
+    airspace.addFile(filename, rawText, zones);
+    onAirspacesChangeCallback?.();
+  }
+
   function filenameFromUrl(url: string): string {
     try {
       const parsed = new URL(url, window.location.href);
@@ -640,9 +657,28 @@ export async function initViewer(options: ViewerOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       const landmarks = detectAndParse(filename, text);
-      if (landmarks.length > 0) addLandmarkFileInternal(label, text, landmarks);
+      if (landmarks.length > 0) {
+        addLandmarkFileInternal(label, text, landmarks);
+      } else if (looksLikeOpenAir(text)) {
+        const zones = parseOpenAir(text);
+        if (zones.length > 0) addAirspaceFileInternal(label, text, zones);
+      }
     } catch (err) {
       console.warn(`[IGC] failed to load landmarks "${label}":`, err);
+    }
+  }
+
+  // Load airspace files supplied via public options.
+  for (const entry of options.airspaces ?? []) {
+    const label = entry.label ?? filenameFromUrl(entry.url);
+    try {
+      const res = await fetch(entry.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const zones = parseOpenAir(text);
+      if (zones.length > 0) addAirspaceFileInternal(label, text, zones);
+    } catch (err) {
+      console.warn(`[IGC] failed to load airspace "${label}":`, err);
     }
   }
 
@@ -969,6 +1005,29 @@ export async function initViewer(options: ViewerOptions) {
       onLandmarksChangeCallback = cb;
     },
 
+    // --- Airspace API ---
+    addAirspaceFile(filename: string, rawText: string, zones: Airspace[]) {
+      addAirspaceFileInternal(filename, rawText, zones);
+    },
+    removeAirspaceFile(id: string) {
+      airspace.removeFile(id);
+      onAirspacesChangeCallback?.();
+    },
+    getAirspaceFiles(): readonly AirspaceFile[] {
+      return airspace.getFiles();
+    },
+    setOnAirspacesChange(cb: () => void) {
+      onAirspacesChangeCallback = cb;
+    },
+
+    /** Pick the airspace zone at normalized device coords (-1..1). Ground zones
+     *  are resolved by intersecting the terrain and point-in-polygon testing. */
+    pickAirspaceAtNDC(ndcX: number, ndcY: number): AirspacePick | null {
+      airspacePickRay.setFromCamera(new Vector2(ndcX, ndcY), camera);
+      const terrainHit = airspacePickRay.intersectObject(tilesHandle.tiles.group, true)[0] ?? null;
+      return airspace.pick(airspacePickRay, terrainHit?.point ?? null, terrainHit?.distance ?? null);
+    },
+
     dispose() {
       taskBuildId++;
       if (cameraAltitudeAnimId !== null) cancelAnimationFrame(cameraAltitudeAnimId);
@@ -983,6 +1042,7 @@ export async function initViewer(options: ViewerOptions) {
           (s.material as SpriteMaterial).dispose();
         }
       }
+      airspace.dispose();
       tracks.dispose();
       globeControls.dispose();
       tilesHandle.dispose();

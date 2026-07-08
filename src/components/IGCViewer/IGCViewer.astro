@@ -3,11 +3,12 @@ interface Props {
   googleApiKey: string;
   tracks?: { url: string; label: string }[];
   landmarks?: { url: string; label?: string }[];
+  airspaces?: { url: string; label?: string }[];
   autoTracking?: boolean;
 }
-const { googleApiKey, tracks = [], landmarks = [], autoTracking = false } = Astro.props;
+const { googleApiKey, tracks = [], landmarks = [], airspaces = [], autoTracking = false } = Astro.props;
 ---
-<igc-viewer google-api-key={googleApiKey} tracks={JSON.stringify(tracks)} landmarks={JSON.stringify(landmarks)} auto-tracking={autoTracking}></igc-viewer>
+<igc-viewer google-api-key={googleApiKey} tracks={JSON.stringify(tracks)} landmarks={JSON.stringify(landmarks)} airspaces={JSON.stringify(airspaces)} auto-tracking={autoTracking}></igc-viewer>
 <script>
   import '../../IGCViewer';
 </script>

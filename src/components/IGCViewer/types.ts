@@ -13,6 +13,8 @@ export interface ViewerOptions {
   googleApiKey: string;
   tracks?: TrackEntry[];
   landmarks?: LandmarkEntry[];
+  /** OpenAir airspace files (custom no-land zones, LZs, restricted areas). */
+  airspaces?: LandmarkEntry[];
 }
 
 export interface IGCPoint {

@@ -1,6 +1,8 @@
 import { initViewer } from './components/IGCViewer/viewer';
 import { createTimeline } from './components/IGCViewer/setupTimeline';
 import { detectAndParse } from './components/IGCViewer/parseLandmarks';
+import { looksLikeOpenAir, parseOpenAir } from './components/IGCViewer/parseAirspace';
+import { airspaceClassLabel, airspaceColor } from './components/IGCViewer/setupAirspace';
 import { formatAltitudeM } from './components/IGCViewer/formatUnits';
 import { sampleTerrainElevationM } from './components/IGCViewer/terrainElevation';
 import { llaToECEF } from './components/IGCViewer/igc';
@@ -31,7 +33,8 @@ import type { BufferGeometry, Material, PerspectiveCamera } from 'three';
 import type { AltitudeMarkerMode, HeightCalculationMode, LandmarkEntry, TrackEntry, TrailLengthMode, UnitMode } from './components/IGCViewer/types';
 
 export type { AltitudeMarkerMode, HeightCalculationMode, LandmarkEntry, TrackEntry, FlightTrack, IGCPoint, TailMode, TrailLengthMode, UnitMode, ViewerOptions } from './components/IGCViewer/types';
-export type { LandmarkFile } from './components/IGCViewer/viewer';
+export type { LandmarkFile, AirspaceFile } from './components/IGCViewer/viewer';
+export type { Airspace, AirspaceAltitude } from './components/IGCViewer/parseAirspace';
 export type { IGCTask, TaskWaypoint, TurnpointType } from './components/IGCViewer/parseTask';
 
 const SHADOW_CSS = `
@@ -798,6 +801,36 @@ const SHADOW_CSS = `
 .igc-lf-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
 .igc-lf-btn svg { width: 100%; height: 100%; }
 
+/* ── Airspace tooltip ─────────────────────────────────────────────────── */
+.igc-airspace-tip {
+  position: absolute;
+  z-index: 40;
+  pointer-events: none;
+  background: rgba(0,0,0,0.82);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 6px;
+  padding: 6px 10px;
+  max-width: 260px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255,255,255,0.85);
+}
+.igc-airspace-tip-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+  color: #fff;
+}
+.igc-airspace-tip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.igc-airspace-tip-meta { color: rgba(255,255,255,0.6); }
+
 /* ── View settings controls ───────────────────────────────────────────── */
 .igc-vs-fancy-details {
   border-top: 1px solid rgba(255,255,255,0.04);
@@ -935,6 +968,7 @@ const SHADOW_CSS = `
 const SHADOW_HTML = `
 <div class="igc-root">
   <canvas class="igc-canvas"></canvas>
+  <div class="igc-airspace-tip" hidden></div>
 
   <div class="igc-drop-overlay" hidden>
     <div class="igc-drop-hint">
@@ -946,7 +980,7 @@ const SHADOW_HTML = `
     </div>
   </div>
 
-  <input type="file" class="igc-file-input" accept=".igc,.wpt,.cup" multiple hidden>
+  <input type="file" class="igc-file-input" accept=".igc,.wpt,.cup,.txt,.openair,.air" multiple hidden>
   <button class="igc-file-btn" title="Open IGC file">
     <svg viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
       <circle cx="22" cy="22" r="20" fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
@@ -1023,6 +1057,17 @@ const SHADOW_HTML = `
         </button>
         <div class="igc-sb-section-body collapsed">
           <div class="igc-landmark-files"></div>
+        </div>
+      </section>
+      <section class="igc-sb-section">
+        <button class="igc-sb-section-btn igc-sb-airspace-toggle collapsed">
+          <span>Airspace</span>
+          <svg class="igc-sb-chevron" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+          </svg>
+        </button>
+        <div class="igc-sb-section-body collapsed">
+          <div class="igc-airspace-files"></div>
         </div>
       </section>
       <section class="igc-sb-section">
@@ -1766,6 +1811,11 @@ class IGCViewerElement extends HTMLElement {
     this.#shadow = this.attachShadow({ mode: 'open' });
   }
 
+  /** The underlying viewer instance (null until async init completes). */
+  get viewer(): Awaited<ReturnType<typeof initViewer>> | null {
+    return this.#viewer;
+  }
+
   connectedCallback() {
     if (this.#shadow.childNodes.length > 0) return;
     this.#shadow.innerHTML = `<style>${SHADOW_CSS}</style>${SHADOW_HTML}`;
@@ -1794,6 +1844,7 @@ class IGCViewerElement extends HTMLElement {
     const apiKey = this.getAttribute('google-api-key') ?? '';
     const tracks = parseJsonAttribute<TrackEntry[]>(this, 'tracks', []);
     const landmarks = parseJsonAttribute<LandmarkEntry[]>(this, 'landmarks', []);
+    const airspaces = parseJsonAttribute<LandmarkEntry[]>(this, 'airspaces', []);
     const autoTracking = this.hasAttribute('auto-tracking');
 
     const root = this.#shadow.querySelector<HTMLElement>('.igc-root')!;
@@ -1804,7 +1855,7 @@ class IGCViewerElement extends HTMLElement {
     const fileInput = root.querySelector<HTMLInputElement>('.igc-file-input')!;
     const fileBtn   = root.querySelector<HTMLButtonElement>('.igc-file-btn')!;
 
-    const viewer = await initViewer({ canvas, googleApiKey: apiKey, tracks, landmarks });
+    const viewer = await initViewer({ canvas, googleApiKey: apiKey, tracks, landmarks, airspaces });
     this.#viewer = viewer;
     const compass3d = createThreeCompass(viewer.renderer, root);
     this.#disposeCompass = compass3d.dispose;
@@ -1974,6 +2025,14 @@ class IGCViewerElement extends HTMLElement {
           if (lms.length > 0) viewer.addLandmarkFile(file.name, text, lms);
           continue;
         }
+        if (looksLikeOpenAir(text)) {
+          const zones = parseOpenAir(text);
+          if (zones.length > 0) {
+            viewer.addAirspaceFile(file.name, text, zones);
+            continue;
+          }
+        }
+        if (ext === 'txt' || ext === 'openair' || ext === 'air') continue; // unparseable airspace text, not an IGC track
         viewer.loadIGCText(text, file.name);
         loadedTrack = true;
       }
@@ -2077,6 +2136,153 @@ class IGCViewerElement extends HTMLElement {
     }
     viewer.setOnLandmarksChange(renderLandmarkFiles);
     renderLandmarkFiles();
+
+    // ── Airspace sidebar wiring ──────────────────────────────────────────
+    const airspaceFilesEl = root.querySelector<HTMLElement>('.igc-airspace-files')!;
+
+    function renderAirspaceFiles() {
+      const files = viewer.getAirspaceFiles();
+      airspaceFilesEl.innerHTML = '';
+      if (files.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'igc-lf-empty';
+        empty.textContent = 'No airspace loaded';
+        airspaceFilesEl.append(empty);
+        return;
+      }
+      for (const f of files) {
+        const row = document.createElement('div');
+        row.className = 'igc-lf-row';
+
+        const name = document.createElement('span');
+        name.className = 'igc-lf-name';
+        name.title = f.filename;
+        name.textContent = f.filename;
+
+        const count = document.createElement('span');
+        count.className = 'igc-lf-count';
+        count.textContent = `${f.airspaces.length} zones`;
+
+        const dlBtn = document.createElement('button');
+        dlBtn.type = 'button';
+        dlBtn.className = 'igc-lf-btn';
+        dlBtn.title = `Download ${f.filename}`;
+        dlBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 10.5 4.5 7H7V3h2v4h2.5L8 10.5z"/><path d="M3 13h10v-1H3v1z"/></svg>`;
+        dlBtn.addEventListener('click', () => {
+          const blob = new Blob([f.rawText], { type: 'text/plain' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = f.filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        });
+
+        const rmBtn = document.createElement('button');
+        rmBtn.type = 'button';
+        rmBtn.className = 'igc-lf-btn';
+        rmBtn.title = `Remove ${f.filename}`;
+        rmBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>`;
+        rmBtn.addEventListener('click', () => viewer.removeAirspaceFile(f.id));
+
+        row.append(name, count, dlBtn, rmBtn);
+        airspaceFilesEl.append(row);
+      }
+    }
+    viewer.setOnAirspacesChange(renderAirspaceFiles);
+    renderAirspaceFiles();
+
+    // ── Airspace hover/tap tooltip ───────────────────────────────────────
+    const airspaceTip = root.querySelector<HTMLElement>('.igc-airspace-tip')!;
+    let airspaceTipPinned = false;
+    let airspaceHoverRaf = 0;
+    let airspaceHoverPos: { x: number; y: number } | null = null;
+
+    const pickAirspaceAtClient = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+      return viewer.pickAirspaceAtNDC(ndcX, ndcY);
+    };
+
+    const showAirspaceTip = (pick: NonNullable<ReturnType<typeof viewer.pickAirspaceAtNDC>>, clientX: number, clientY: number) => {
+      const zone = pick.airspace;
+      airspaceTip.innerHTML = '';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'igc-airspace-tip-name';
+      const swatch = document.createElement('span');
+      swatch.className = 'igc-airspace-tip-swatch';
+      swatch.style.background = `#${airspaceColor(zone.cls).toString(16).padStart(6, '0')}`;
+      const nameText = document.createElement('span');
+      nameText.textContent = zone.name || '(unnamed)';
+      nameEl.append(swatch, nameText);
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'igc-airspace-tip-meta';
+      const floorRaw = zone.floor.raw || 'SFC';
+      const ceilRaw = zone.ceiling.raw || 'SFC';
+      const isGroundZone = zone.floor.ref === 'sfc' && zone.ceiling.ref === 'sfc';
+      metaEl.textContent = isGroundZone
+        ? `${airspaceClassLabel(zone.cls)} · ground zone`
+        : `${airspaceClassLabel(zone.cls)} · ${floorRaw} – ${ceilRaw}`;
+
+      airspaceTip.append(nameEl, metaEl);
+      airspaceTip.hidden = false;
+
+      const rootRect = root.getBoundingClientRect();
+      let x = clientX - rootRect.left + 14;
+      let y = clientY - rootRect.top + 14;
+      x = Math.min(x, rootRect.width - airspaceTip.offsetWidth - 8);
+      y = Math.min(y, rootRect.height - airspaceTip.offsetHeight - 8);
+      airspaceTip.style.left = `${Math.max(4, x)}px`;
+      airspaceTip.style.top = `${Math.max(4, y)}px`;
+    };
+
+    const processAirspaceHover = () => {
+      airspaceHoverRaf = 0;
+      if (!airspaceHoverPos || airspaceTipPinned) return;
+      const pick = pickAirspaceAtClient(airspaceHoverPos.x, airspaceHoverPos.y);
+      if (pick) showAirspaceTip(pick, airspaceHoverPos.x, airspaceHoverPos.y);
+      else airspaceTip.hidden = true;
+    };
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType !== 'mouse' || e.buttons !== 0) return;
+      airspaceHoverPos = { x: e.clientX, y: e.clientY };
+      if (!airspaceHoverRaf) airspaceHoverRaf = requestAnimationFrame(processAirspaceHover);
+    });
+    canvas.addEventListener('pointerleave', () => {
+      airspaceHoverPos = null;
+      if (!airspaceTipPinned) airspaceTip.hidden = true;
+    });
+
+    // Tap/click pins the tooltip (touch devices have no hover). Uses the same
+    // press-release slop pattern as the pilot HUD so drags don't trigger it.
+    let airspaceTapCandidate: { pointerId: number; x: number; y: number } | null = null;
+    const AIRSPACE_TAP_SLOP_PX = 6;
+    canvas.addEventListener('pointerdown', (e) => {
+      airspaceTapCandidate = e.button === 0 ? { pointerId: e.pointerId, x: e.clientX, y: e.clientY } : null;
+    });
+    canvas.addEventListener('pointerup', (e) => {
+      const candidate = airspaceTapCandidate;
+      airspaceTapCandidate = null;
+      if (!candidate || candidate.pointerId !== e.pointerId) return;
+      if (Math.hypot(e.clientX - candidate.x, e.clientY - candidate.y) > AIRSPACE_TAP_SLOP_PX) return;
+      if (pilotHudOverlay.hitTest(e.clientX, e.clientY) !== null) return; // pilot HUD taps take priority
+      const pick = pickAirspaceAtClient(e.clientX, e.clientY);
+      if (pick) {
+        showAirspaceTip(pick, e.clientX, e.clientY);
+        airspaceTipPinned = true;
+      } else {
+        airspaceTipPinned = false;
+        airspaceTip.hidden = true;
+      }
+    });
+    canvas.addEventListener('pointercancel', () => {
+      airspaceTapCandidate = null;
+    });
 
     const tracksListEl = root.querySelector<HTMLElement>('.igc-tracks-list')!;
     const trackSearchWrap = root.querySelector<HTMLElement>('.igc-track-search')!;
@@ -2720,6 +2926,7 @@ class IGCViewerElement extends HTMLElement {
     }
     bindSectionToggle('.igc-sb-tracks-toggle');
     bindSectionToggle('.igc-sb-landmarks-toggle');
+    bindSectionToggle('.igc-sb-airspace-toggle');
     bindSectionToggle('.igc-sb-flight-toggle');
     bindSectionToggle('.igc-sb-viewoptions-toggle');
     bindSectionToggle('.igc-sb-settings-toggle');
