@@ -14,7 +14,7 @@ import { Line2 } from 'three/examples/jsm/lines/webgpu/Line2.js';
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 import { llaToECEF } from './igc';
 import { sampleTerrainElevationM } from './terrainElevation';
-import { clearAirspaceOverlay, setAirspaceOverlay } from './airspaceOverlay';
+import { setOverlaySource } from './airspaceOverlay';
 import type { Airspace } from './parseAirspace';
 
 export interface AirspaceFile {
@@ -30,15 +30,9 @@ export interface AirspacePick {
   distance: number;
 }
 
-// Ground zones (SFC–SFC) are painted onto the terrain via the tile-shader
-// overlay texture — no geometry. Volumetric zones (published floor/ceiling)
-// render as extruded prisms.
-const OVERLAY_TARGET_M_PER_PX = 3;
-const OVERLAY_MAX_TEXTURE_PX = 4096;
-const OVERLAY_MARGIN_M = 200;
-const OVERLAY_FILL_ALPHA = 0.42;
-const OVERLAY_STROKE_ALPHA = 0.9;
-
+// Ground zones (SFC–SFC) are painted onto the terrain via per-tile overlay
+// textures in the tile shader — no geometry. Volumetric zones (published
+// floor/ceiling) render as extruded prisms.
 const PRISM_GROUND_BLEED_M = 80;
 const UNLIMITED_CEILING_AGL_M = 6000;
 const PRISM_FILL_OPACITY = 0.18;
@@ -87,10 +81,6 @@ function isGroundZone(a: Airspace): boolean {
   return a.floor.ref === 'sfc' && a.ceiling.ref === 'sfc';
 }
 
-function cssColor(hex: number, alpha: number): string {
-  return `rgba(${(hex >> 16) & 0xff},${(hex >> 8) & 0xff},${hex & 0xff},${alpha})`;
-}
-
 /** Even-odd point-in-polygon test in 2D. */
 function pointInPolygon(x: number, y: number, poly: Vector2[]): boolean {
   let inside = false;
@@ -108,8 +98,10 @@ interface GroundZone {
   airspace: Airspace;
   /** Polygon vertices in ECEF at zero elevation (elevation-invariant tangent projection). */
   ecefRing: Vector3[];
-  /** Region tangent-plane coords; refreshed on every overlay redraw. */
+  /** Tangent-frame coords (origin at the zone-set centroid); refreshed on every source rebuild. */
   poly2D: Vector2[];
+  bboxMin: Vector2;
+  bboxMax: Vector2;
   areaM2: number;
 }
 
@@ -120,12 +112,12 @@ interface PrismZone {
   outline: Line2;
 }
 
-interface OverlayRegionState {
-  centerEcef: Vector3;   // ECEF of the overlay rectangle centre
+interface PickFrameState {
+  originEcef: Vector3;
   east: Vector3;
   north: Vector3;
-  halfWidthM: number;
-  halfHeightM: number;
+  boundsMin: Vector2;
+  boundsMax: Vector2;
   surfaceRadiusM: number; // for ray-sphere fallback picking when tiles aren't loaded
 }
 
@@ -135,7 +127,7 @@ export function createAirspaceManager(scene: Scene) {
   const groundZones: GroundZone[] = [];
   const prismZones: PrismZone[] = [];
   const materialCache = new Map<number, { fill: MeshBasicNodeMaterial; line: Line2NodeMaterial }>();
-  let region: OverlayRegionState | null = null;
+  let pickFrame: PickFrameState | null = null;
 
   function materialsFor(cls: string) {
     const color = airspaceColor(cls);
@@ -154,16 +146,16 @@ export function createAirspaceManager(scene: Scene) {
     return cached;
   }
 
-  // ── Ground zones: rasterized overlay ─────────────────────────────────
+  // ── Ground zones: shader overlay source ──────────────────────────────
 
-  function redrawOverlay(): void {
+  function rebuildOverlaySource(): void {
     if (groundZones.length === 0) {
-      region = null;
-      clearAirspaceOverlay();
+      pickFrame = null;
+      setOverlaySource(null);
       return;
     }
 
-    // Region basis: tangent plane at the centroid of all zone centres.
+    // Tangent frame at the centroid of all zone centres.
     const centroid = new Vector3();
     for (const z of groundZones) {
       const c = new Vector3();
@@ -176,76 +168,44 @@ export function createAirspaceManager(scene: Scene) {
     const north = new Vector3().crossVectors(up, east).normalize();
 
     // Project all rings into tangent-plane metres; collect bounds.
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const boundsMin = new Vector2(Infinity, Infinity);
+    const boundsMax = new Vector2(-Infinity, -Infinity);
     const rel = new Vector3();
     for (const z of groundZones) {
+      z.bboxMin = new Vector2(Infinity, Infinity);
+      z.bboxMax = new Vector2(-Infinity, -Infinity);
       z.poly2D = z.ecefRing.map((v) => {
         rel.copy(v).sub(centroid);
         const p = new Vector2(rel.dot(east), rel.dot(north));
-        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+        z.bboxMin.min(p);
+        z.bboxMax.max(p);
         return p;
       });
+      boundsMin.min(z.bboxMin);
+      boundsMax.max(z.bboxMax);
       z.areaM2 = Math.abs(ShapeUtils.area(z.poly2D));
     }
-    minX -= OVERLAY_MARGIN_M; minY -= OVERLAY_MARGIN_M;
-    maxX += OVERLAY_MARGIN_M; maxY += OVERLAY_MARGIN_M;
 
-    const widthM = maxX - minX;
-    const heightM = maxY - minY;
-    const mPerPx = Math.max(OVERLAY_TARGET_M_PER_PX, Math.max(widthM, heightM) / OVERLAY_MAX_TEXTURE_PX);
-    const pxW = Math.max(2, Math.ceil(widthM / mPerPx));
-    const pxH = Math.max(2, Math.ceil(heightM / mPerPx));
-
-    const canvas = document.createElement('canvas');
-    canvas.width = pxW;
-    canvas.height = pxH;
-    const ctx = canvas.getContext('2d')!;
-    ctx.lineWidth = Math.min(3, Math.max(1.25, 15 / mPerPx));
-    ctx.lineJoin = 'round';
-
-    // Canvas rows run top-down; texture v runs bottom-up (flipY) — draw with north up.
-    const toPx = (p: Vector2) => [(p.x - minX) / mPerPx, (maxY - p.y) / mPerPx] as const;
-    for (const z of groundZones) {
-      ctx.beginPath();
-      const [x0, y0] = toPx(z.poly2D[0]);
-      ctx.moveTo(x0, y0);
-      for (let i = 1; i < z.poly2D.length; i++) {
-        const [x, y] = toPx(z.poly2D[i]);
-        ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      const color = airspaceColor(z.airspace.cls);
-      ctx.fillStyle = cssColor(color, OVERLAY_FILL_ALPHA);
-      ctx.strokeStyle = cssColor(color, OVERLAY_STROKE_ALPHA);
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    // Shader uniforms describe the rectangle centre, not the tangent origin.
-    const rectCenter2D = new Vector2((minX + maxX) / 2, (minY + maxY) / 2);
-    const centerEcef = centroid.clone()
-      .addScaledVector(east, rectCenter2D.x)
-      .addScaledVector(north, rectCenter2D.y);
-    // Shift zone polys so they share the rectangle-centre origin used for picking.
-    for (const z of groundZones) {
-      for (const p of z.poly2D) p.sub(rectCenter2D);
-    }
-
-    region = {
-      centerEcef,
+    pickFrame = {
+      originEcef: centroid,
       east,
       north,
-      halfWidthM: widthM / 2,
-      halfHeightM: heightM / 2,
+      boundsMin,
+      boundsMax,
       surfaceRadiusM: centroid.length(),
     };
-    setAirspaceOverlay(canvas, {
-      centerEcef,
-      eastEcef: east,
-      northEcef: north,
-      halfWidthM: widthM / 2,
-      halfHeightM: heightM / 2,
+    setOverlaySource({
+      originEcef: centroid,
+      east,
+      north,
+      zones: groundZones.map((z) => ({
+        poly: z.poly2D,
+        color: airspaceColor(z.airspace.cls),
+        bboxMin: z.bboxMin,
+        bboxMax: z.bboxMax,
+      })),
+      boundsMin,
+      boundsMax,
     });
   }
 
@@ -255,19 +215,23 @@ export function createAirspaceManager(scene: Scene) {
       airspace,
       ecefRing: points.map((p) => llaToECEF(p.lat, p.lon, 0)),
       poly2D: [],
+      bboxMin: new Vector2(),
+      bboxMax: new Vector2(),
       areaM2: 0,
     });
   }
 
   /** Ground zone under an ECEF surface point (smallest zone wins on overlap). */
   function groundZoneAtEcef(point: Vector3): GroundZone | null {
-    if (!region) return null;
-    const rel = point.clone().sub(region.centerEcef);
-    const x = rel.dot(region.east);
-    const y = rel.dot(region.north);
-    if (Math.abs(x) > region.halfWidthM || Math.abs(y) > region.halfHeightM) return null;
+    if (!pickFrame) return null;
+    const rel = point.clone().sub(pickFrame.originEcef);
+    const x = rel.dot(pickFrame.east);
+    const y = rel.dot(pickFrame.north);
+    if (x < pickFrame.boundsMin.x || x > pickFrame.boundsMax.x) return null;
+    if (y < pickFrame.boundsMin.y || y > pickFrame.boundsMax.y) return null;
     let best: GroundZone | null = null;
     for (const z of groundZones) {
+      if (x < z.bboxMin.x || x > z.bboxMax.x || y < z.bboxMin.y || y > z.bboxMax.y) continue;
       if (z.poly2D.length >= 3 && pointInPolygon(x, y, z.poly2D)) {
         if (!best || z.areaM2 < best.areaM2) best = z;
       }
@@ -275,11 +239,11 @@ export function createAirspaceManager(scene: Scene) {
     return best;
   }
 
-  /** Ray → sphere at the region's surface radius; used when no tile terrain is loaded yet. */
+  /** Ray → sphere at the zone-set surface radius; used when no tile terrain is loaded yet. */
   function raySurfaceFallback(raycaster: Raycaster): Vector3 | null {
-    if (!region) return null;
+    if (!pickFrame) return null;
     const o = raycaster.ray.origin, d = raycaster.ray.direction;
-    const r = region.surfaceRadiusM;
+    const r = pickFrame.surfaceRadiusM;
     const b = o.dot(d);
     const c = o.lengthSq() - r * r;
     const disc = b * b - c;
@@ -387,7 +351,7 @@ export function createAirspaceManager(scene: Scene) {
         if (isGroundZone(a)) addGroundZone(file.id, a, points);
         else void buildPrismZone(file.id, a, points);
       }
-      redrawOverlay();
+      rebuildOverlaySource();
       return file;
     },
 
@@ -403,7 +367,7 @@ export function createAirspaceManager(scene: Scene) {
         }
       }
       files = files.filter((f) => f.id !== id);
-      redrawOverlay();
+      rebuildOverlaySource();
     },
 
     getFiles(): readonly AirspaceFile[] {
@@ -456,7 +420,7 @@ export function createAirspaceManager(scene: Scene) {
       }
       materialCache.clear();
       files = [];
-      clearAirspaceOverlay();
+      setOverlaySource(null);
     },
   };
 }
