@@ -29,12 +29,12 @@ jobs:
       contents: write   # tag + GitHub release
     steps:
       - uses: actions/checkout@v4
+      # No registry-url here: setup-node would write a placeholder _authToken into
+      # .npmrc that shadows the OIDC trusted-publishing flow. Node 24 ships npm ≥ 11.6,
+      # which handles trusted publishing natively.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
-      # Trusted publishing needs a recent npm.
-      - run: npm install -g npm@latest
 
       - name: Check whether this version needs publishing
         id: version
